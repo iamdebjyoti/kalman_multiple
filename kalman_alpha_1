@@ -1,0 +1,201 @@
+//code to interface two 6050 to arduii
+// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE n implementation
+// is used in I2Cdev.h
+#include <Wire.h>
+#include <Kalman.h>
+
+// I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
+// for both classes must be in the include path of your project
+#include "I2Cdev.h"
+#include "MPU6050.h"
+
+// class default I2C address is 0x68
+// specific I2C addresses may be passed as a parameter here
+// AD0 low = 0x68 (default for InvenSense evaluation board)
+// AD0 high = 0x69
+//MPU6050 accelgyro;
+MPU6050 accelgyroIC1(0x68);
+MPU6050 accelgyroIC2(0x69);
+
+boolean flag1=0;
+
+#define RESTRICT_PITCH // Comment out to restrict roll to ±90deg instead - please read: http://www.freescale.com/files/sensors/doc/app_note/AN3461.pdf
+
+Kalman kalmanX; // Create the Kalman instances
+Kalman kalmanY;
+
+/* IMU Data */
+double accX, accY, accZ;
+double gyroX, gyroY, gyroZ;
+int16_t tempRaw;
+
+double gyroXangle, gyroYangle, gyroXangle1, gyroYangle1, gyroXangle2, gyroYangle2; // Angle calculate using the gyro only
+double compAngleX, compAngleY, compAngleX1, compAngleY1, compAngleX2, compAngleY2; // Calculated angle using a complementary filter
+double kalAngleX, kalAngleY, kalAngleX1, kalAngleY1, kalAngleX2, kalAngleY2; // Calculated angle using a Kalman filter
+
+uint32_t timer;
+uint8_t i2cData[14]; // Buffer for I2C data
+
+int16_t ax1, ay1, az1;
+int16_t gx1, gy1, gz1;
+//uint32_t timer;
+
+int16_t ax2, ay2, az2;
+int16_t gx2, gy2, gz2;
+
+#define LED_PIN 13
+bool blinkState = false;
+
+void setup() 
+{
+  Serial.begin(115200);
+  Wire.begin();
+   #if ARDUINO >= 157
+  Wire.setClock(400000UL); // Set I2C frequency to 400kHz
+  #else
+  TWBR = ((F_CPU / 400000UL) - 16) / 2; // Set I2C frequency to 400kHz
+  #endif
+
+
+    //accelgyro.initialize();
+    accelgyroIC1.initialize();
+    accelgyroIC2.initialize();
+    
+    accelgyroIC1.getMotion6(&ax1, &ay1, &az1, &gx1, &gy1, &gz1);
+    accelgyroIC2.getMotion6(&ax2, &ay2, &az2, &gx2, &gy2, &gz2);
+    
+    #ifdef RESTRICT_PITCH // Eq. 25 and 26
+  double roll1  = atan2(ay1, az1) * RAD_TO_DEG;
+  double roll2  = atan2(ay1, az1) * RAD_TO_DEG;
+  double pitch1 = atan(-ax1 / sqrt(ay1 * ay1 + az1 * az1)) * RAD_TO_DEG;
+  double pitch2 = atan(-ax1 / sqrt(ay1 * ay1 + az1 * az1)) * RAD_TO_DEG;
+  #else // Eq. 28 and 29
+  double roll1  = atan(ay1 / sqrt(ax1 * ax1 + az1 * az1)) * RAD_TO_DEG;
+  double roll2  = atan(ay1 / sqrt(ax1 * ax1 + az1 * az1)) * RAD_TO_DEG;
+  double pitch1 = atan2(-ax1, az1) * RAD_TO_DEG;
+  double pitch2 = atan2(-ax1, az1) * RAD_TO_DEG;
+  #endif
+
+  kalmanX.setAngle(roll1); // Set starting angle
+  kalmanX.setAngle(roll2); // Set starting angle
+  kalmanY.setAngle(pitch1);
+  kalmanY.setAngle(pitch2);
+  gyroXangle1 = roll1;
+  gyroXangle2 = roll2;
+  gyroYangle1 = pitch1;
+  gyroYangle2 = pitch2;
+  compAngleX1 = roll1;
+  compAngleX2 = roll2;
+  compAngleY1 = pitch1;
+  compAngleY2 = pitch2;
+
+  timer = micros();
+}
+
+void loop() 
+{
+    // read raw accel/gyro measurements from device
+    accelgyroIC1.getMotion6(&ax1, &ay1, &az1, &gx1, &gy1, &gz1);
+    accelgyroIC2.getMotion6(&ax2, &ay2, &az2, &gx2, &gy2, &gz2);
+    
+    double dt = (double)(micros() - timer) / 1000000; // Calculate delta time
+  timer = micros();
+    
+    #ifdef RESTRICT_PITCH // Eq. 25 and 26
+  double roll1  = atan2(ay1, az1) * RAD_TO_DEG;
+  double roll2  = atan2(ay2, az2) * RAD_TO_DEG;
+  double pitch1 = atan(-ax1 / sqrt(ay1 * ay1 + az1 * az1)) * RAD_TO_DEG;
+  double pitch2 = atan(-ax2 / sqrt(ay2 * ay2 + az2 * az2)) * RAD_TO_DEG;
+#else // Eq. 28 and 29
+  double roll1  = atan(ay1 / sqrt(ax1 * ax1 + az1 * az1)) * RAD_TO_DEG;
+  double roll2  = atan(ay2 / sqrt(ax2 * ax2 + az2 * az2)) * RAD_TO_DEG;
+  double pitch1 = atan2(-ax1, az1) * RAD_TO_DEG;
+  double pitch2 = atan2(-ax2, az2) * RAD_TO_DEG;
+#endif
+
+  double gyroXrate1 = gx1 / 131.0; // Convert to deg/s
+  double gyroXrate2 = gx2 / 131.0; // Convert to deg/s
+  double gyroYrate1 = gy1 / 131.0; // Convert to deg/s
+  double gyroYrate2 = gy2 / 131.0; // Convert to deg/s
+
+  /////////////////////////////////////
+  
+  double kalAngleX1=calculate(roll1, pitch1, dt, gyroYrate1, gyroXrate1);
+  flag1=1;
+  delay(2);
+  double kalAngleX2=calculate(roll2, pitch2, dt, gyroYrate2, gyroXrate2);
+  flag1=0;
+  
+  
+  /////////////////////////////////////
+  
+
+   Serial.println(kalAngleX1); Serial.print("\t");
+   Serial.println(kalAngleX2); Serial.print("\t");
+
+    delay(2);
+}
+
+double calculate(double roll, double pitch, double dt, double gyroYrate, double gyroXrate)
+{
+  if(flag1==0)
+  {
+    gyroXangle=gyroXangle1;
+    gyroYangle=gyroYangle1;
+    compAngleX=compAngleX1;
+    compAngleY=compAngleY1;
+  }
+  else if(flag1==1)
+  {
+    gyroXangle=gyroXangle2;
+    gyroYangle=gyroYangle2;
+    compAngleX=compAngleX2;
+    compAngleY=compAngleY2;  
+  }
+  
+    
+    #ifdef RESTRICT_PITCH
+  // This fixes the transition problem when the accelerometer angle jumps between -180 and 180 degrees
+  if ((roll < -90 && kalAngleX > 90) || (roll > 90 && kalAngleX < -90)) {
+    kalmanX.setAngle(roll);
+    compAngleX = roll;
+    kalAngleX = roll;
+    gyroXangle = roll;
+  } else
+    kalAngleX = kalmanX.getAngle(roll, gyroXrate, dt); // Calculate the angle using a Kalman filter
+
+  if (abs(kalAngleX) > 90)
+    gyroYrate = -gyroYrate; // Invert rate, so it fits the restriced accelerometer reading
+  kalAngleY = kalmanY.getAngle(pitch, gyroYrate, dt);
+#else
+  // This fixes the transition problem when the accelerometer angle jumps between -180 and 180 degrees
+  if ((pitch < -90 && kalAngleY > 90) || (pitch > 90 && kalAngleY < -90)) {
+    kalmanY.setAngle(pitch);
+    compAngleY = pitch;
+    kalAngleY = pitch;
+    gyroYangle = pitch;
+  } else
+    kalAngleY = kalmanY.getAngle(pitch, gyroYrate, dt); // Calculate the angle using a Kalman filter
+
+  if (abs(kalAngleY) > 90)
+    gyroXrate = -gyroXrate; // Invert rate, so it fits the restriced accelerometer reading
+  kalAngleX = kalmanX.getAngle(roll, gyroXrate, dt); // Calculate the angle using a Kalman filter
+#endif
+
+  gyroXangle += gyroXrate * dt; // Calculate gyro angle without any filter
+  gyroYangle += gyroYrate * dt;
+  //gyroXangle += kalmanX.getRate() * dt; // Calculate gyro angle using the unbiased rate
+  //gyroYangle += kalmanY.getRate() * dt;
+
+  compAngleX = 0.93 * (compAngleX + gyroXrate * dt) + 0.07 * roll; // Calculate the angle using a Complimentary filter
+  compAngleY = 0.93 * (compAngleY + gyroYrate * dt) + 0.07 * pitch;
+
+  // Reset the gyro angle when it has drifted too much
+  if (gyroXangle < -180 || gyroXangle > 180)
+    gyroXangle = kalAngleX;
+  if (gyroYangle < -180 || gyroYangle > 180)
+    gyroYangle = kalAngleY;
+    
+    return kalAngleX;
+  
+}
